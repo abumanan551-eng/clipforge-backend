@@ -2,7 +2,6 @@ import os
 import subprocess
 import uuid
 import re
-import glob
 from typing import List, Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,7 +27,6 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 
-# Whisper AI ماڈل (سب سے متوازن اور طاقتور "base" ماڈل)
 whisper_model = None
 
 def get_whisper():
@@ -114,7 +112,7 @@ class YoutubeRequest(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Backend running with Auto-Whisper AI"}
+    return {"status": "ok", "message": "Backend running with Bot-Bypass"}
 
 @app.post("/upload")
 async def upload_video(file: UploadFile = File(...)):
@@ -130,13 +128,20 @@ def download_youtube_video(payload: YoutubeRequest):
     unique_id = uuid.uuid4().hex[:8]
     output_template = os.path.join(UPLOAD_DIR, f"yt_{unique_id}.%(ext)s")
 
+    # یوٹیوب بوٹ بائی پاس سیٹنگز (Android & iOS User-Agents)
     ydl_opts = {
         'format': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best',
         'outtmpl': output_template,
         'merge_output_format': 'mp4',
-        'writesubtitles': True,
-        'writeautomaticsub': True,
-        'subtitleslangs': ['en'],
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web']
+            }
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9'
+        },
         'quiet': True
     }
     try:
@@ -149,7 +154,6 @@ def download_youtube_video(payload: YoutubeRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# آٹو AI ٹرانسکرپٹ اور کلپ جنریٹر
 @app.post("/cut")
 def cut_video_clips(payload: CutRequest):
     if not os.path.exists(payload.video_path):
@@ -157,14 +161,12 @@ def cut_video_clips(payload: CutRequest):
 
     clips_to_process = payload.clips or []
 
-    # اگر ٹرانسکرپٹ نہیں دیا گیا تو خودکار Whisper AI آڈیو سنے گا
     if not clips_to_process or payload.auto_ai:
         model = get_whisper()
         transcription = model.transcribe(payload.video_path)
         segments = transcription.get("segments", [])
         
         clips_to_process = []
-        # طویل وائرل سیگمنٹس کو یکجا کرنا (30 سے 45 سیکنڈ کے کلپس)
         current_text = []
         seg_start = 0.0
         
