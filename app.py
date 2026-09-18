@@ -2,15 +2,16 @@ import os
 import subprocess
 import uuid
 import re
+import glob
 from typing import List, Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yt_dlp
-import whisper
+import webvtt
 
-app = FastAPI(title="ClipForge Pro AI")
+app = FastAPI(title="ClipForge Stable")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,20 +28,17 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 
-whisper_model = None
-
-def get_whisper():
-    global whisper_model
-    if whisper_model is None:
-        whisper_model = whisper.load_model("base")
-    return whisper_model
-
 def parse_time(time_str: str) -> float:
-    parts = list(map(int, re.split(r'[:.]', str(time_str).strip())))
-    if len(parts) == 2:
-        return parts[0] * 60 + parts[1]
-    elif len(parts) == 3:
-        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    try:
+        parts = list(map(float, re.split(r'[:.]', str(time_str).strip())))
+        if len(parts) == 2:
+            return parts[0] * 60 + parts[1]
+        elif len(parts) == 3:
+            return parts[0] * 3600 + parts[1] * 60 + parts[2]
+        elif len(parts) == 4:
+            return parts[0] * 3600 + parts[1] * 60 + parts[2] + parts[3]/1000
+    except:
+        pass
     return 0.0
 
 def format_ass_time(seconds: float) -> str:
@@ -77,12 +75,12 @@ Style: Default,Arial Black,74,{cfg['primary']},-1,{cfg['outline']},&H80000000,-1
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    words = text.split()
-    if not words:
-        words = ["CHECK", "THIS", "OUT!"]
+    clean_words = re.sub(r'[\r\n]+', ' ', text).split()
+    if not clean_words:
+        clean_words = ["BEST", "VIRAL", "MOMENT"]
 
     chunk_size = 3
-    chunks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+    chunks = [" ".join(clean_words[i:i+chunk_size]) for i in range(0, len(clean_words), chunk_size)]
     chunk_dur = duration / max(len(chunks), 1)
 
     for i, chk in enumerate(chunks):
@@ -104,22 +102,20 @@ class CutRequest(BaseModel):
     clips: Optional[List[ClipMeta]] = []
     aspect_ratio: str = "9:16"
     caption_style: str = "hormozi"
-    auto_ai: bool = True
-    clips_count: int = 3
 
 class YoutubeRequest(BaseModel):
     url: str
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Backend running with Bot-Bypass"}
+    return {"status": "ok", "message": "Backend Stable"}
 
 @app.post("/upload")
 async def upload_video(file: UploadFile = File(...)):
     ext = file.filename.split(".")[-1]
-    dest_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{ext}")
+    dest_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex[:8]}.{ext}")
     with open(dest_path, "wb") as buffer:
-        while chunk := await file.read(1024 * 1024 * 10):
+        while chunk := await file.read(1024 * 1024 * 4): # 4MB chunks
             buffer.write(chunk)
     return {"status": "success", "path": dest_path}
 
@@ -128,19 +124,18 @@ def download_youtube_video(payload: YoutubeRequest):
     unique_id = uuid.uuid4().hex[:8]
     output_template = os.path.join(UPLOAD_DIR, f"yt_{unique_id}.%(ext)s")
 
-    # یوٹیوب بوٹ بائی پاس سیٹنگز (Android & iOS User-Agents)
+    # YouTube Bot Bypass + Auto Subtitles ڈاؤنلوڈ
     ydl_opts = {
-        'format': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best',
+        'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
         'outtmpl': output_template,
         'merge_output_format': 'mp4',
+        'writesubtitles': True,
+        'writeautomaticsub': True,
+        'subtitleslangs': ['en'],
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web']
+                'player_client': ['android', 'ios']
             }
-        },
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9'
         },
         'quiet': True
     }
@@ -150,44 +145,54 @@ def download_youtube_video(payload: YoutubeRequest):
             video_filename = ydl.prepare_filename(info)
             if not video_filename.endswith('.mp4'):
                 video_filename = os.path.splitext(video_filename)[0] + '.mp4'
-        return {"status": "success", "path": video_filename, "title": info.get('title', 'Video')}
+
+        # خودکار سب ٹائٹلز کو پڑھ کر کلپس بنانا
+        clips = []
+        vtt_files = glob.glob(os.path.join(UPLOAD_DIR, f"yt_{unique_id}*.vtt"))
+        if vtt_files:
+            try:
+                vtt = webvtt.read(vtt_files[0])
+                current_text = []
+                c_start = 0.0
+                for caption in vtt:
+                    s = parse_time(caption.start)
+                    e = parse_time(caption.end)
+                    if not current_text:
+                        c_start = s
+                    txt = caption.text.strip().replace('\n', ' ')
+                    if txt and (not current_text or txt != current_text[-1]):
+                        current_text.append(txt)
+                    if (e - c_start) >= 30:
+                        clips.append({
+                            "timestamp_start": str(round(c_start, 2)),
+                            "timestamp_end": str(round(e, 2)),
+                            "title": f"Viral Highlight #{len(clips)+1}",
+                            "caption_text": " ".join(current_text)
+                        })
+                        current_text = []
+                        if len(clips) >= 3:
+                            break
+            except:
+                pass
+
+        if not clips:
+            clips = [
+                {"timestamp_start": "10", "timestamp_end": "40", "title": "Highlight #1", "caption_text": "WATCH THIS INCREDIBLE MOMENT RIGHT HERE"},
+                {"timestamp_start": "45", "timestamp_end": "75", "title": "Highlight #2", "caption_text": "THE MOST IMPORTANT PART OF THE VIDEO"}
+            ]
+
+        return {"status": "success", "path": video_filename, "title": info.get('title', 'Video'), "clips": clips}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/cut")
 def cut_video_clips(payload: CutRequest):
     if not os.path.exists(payload.video_path):
-        raise HTTPException(status_code=404, detail="Video file not found")
+        raise HTTPException(status_code=404, detail="Video not found")
 
-    clips_to_process = payload.clips or []
-
-    if not clips_to_process or payload.auto_ai:
-        model = get_whisper()
-        transcription = model.transcribe(payload.video_path)
-        segments = transcription.get("segments", [])
-        
-        clips_to_process = []
-        current_text = []
-        seg_start = 0.0
-        
-        for seg in segments:
-            if not current_text:
-                seg_start = seg["start"]
-            current_text.append(seg["text"])
-            
-            if (seg["end"] - seg_start) >= 30:
-                clips_to_process.append(ClipMeta(
-                    timestamp_start=str(round(seg_start, 2)),
-                    timestamp_end=str(round(seg["end"], 2)),
-                    title=f"Viral Highlight #{len(clips_to_process) + 1}",
-                    caption_text=" ".join(current_text)
-                ))
-                current_text = []
-                if len(clips_to_process) >= payload.clips_count:
-                    break
-
-        if not clips_to_process:
-            clips_to_process = [ClipMeta(timestamp_start="10", timestamp_end="40", title="Best Moment", caption_text=transcription.get("text", "")[:120])]
+    clips = payload.clips
+    if not clips:
+        clips = [ClipMeta(timestamp_start="10", timestamp_end="40", title="Highlight #1", caption_text="VIRAL MOMENT")]
 
     results = []
     ratio_filters = {
@@ -197,10 +202,10 @@ def cut_video_clips(payload: CutRequest):
     }
     base_vf = ratio_filters.get(payload.aspect_ratio, ratio_filters["9:16"])
 
-    for i, clip in enumerate(clips_to_process):
+    for i, clip in enumerate(clips):
         start_sec = parse_time(clip.timestamp_start)
         end_sec = parse_time(clip.timestamp_end)
-        duration = max(end_sec - start_sec, 20.0)
+        duration = max(end_sec - start_sec, 15.0)
 
         output_filename = f"clip_{uuid.uuid4().hex[:8]}_{i+1}.mp4"
         output_filepath = os.path.join(OUTPUT_DIR, output_filename)
@@ -219,10 +224,10 @@ def cut_video_clips(payload: CutRequest):
             "-t", str(duration),
             "-vf", vf_filter,
             "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "18",
+            "-preset", "ultrafast",
+            "-crf", "22",
             "-c:a", "aac",
-            "-b:a", "192k",
+            "-b:a", "128k",
             output_filepath
         ]
 
