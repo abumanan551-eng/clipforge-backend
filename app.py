@@ -3,7 +3,6 @@ import subprocess
 import uuid
 import re
 import glob
-import random
 from typing import List, Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -92,29 +91,36 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(ass_content)
 
-# وائرل ٹائٹلز اور ہیش ٹیگ جنریٹر
-VIRAL_HOOKS = [
-    "Wait for the end! 😱",
-    "Nobody expected this to happen...",
-    "The secret that changes everything 🔥",
-    "Watch before this gets taken down!",
-    "This moment literally blew my mind 🤯"
-]
-
-TRENDING_TAGS = [
-    "#Shorts #Viral #Trending #FYP #MustWatch",
-    "#MindBlowing #DailyShorts #ReelsViral #ViralVideo",
-    "#OpusClip #YouTubeShorts #CrazyMoment #TikTokViral"
-]
+def make_metadata(topic: str, idx: int):
+    clean_topic = re.sub(r'[^\w\s]', '', topic).strip()
+    words = clean_topic.split()
+    keyword = words[0] if words else "Video"
+    
+    titles = [
+        f"The Truth About {keyword} 🤯",
+        f"You Won't Believe What Happened! 😱",
+        f"Why Everyone Is Talking About This... 🔥",
+        f"Top Secret Exposed: {clean_topic[:25]}..."
+    ]
+    
+    tags = [
+        f"#{keyword} #Shorts #Viral #Trending #FYP",
+        f"#{keyword} #MindBlowing #MustWatch #Reels #YouTubeShorts",
+        f"#{keyword} #Highlights #ViralVideo #Explore #DailyShorts"
+    ]
+    
+    scores = [97, 94, 91, 88]
+    return titles[idx % len(titles)], tags[idx % len(tags)], scores[idx % len(scores)]
 
 class ClipMeta(BaseModel):
     timestamp_start: str
     timestamp_end: str
-    title: Optional[str] = "Clip"
+    title: Optional[str] = ""
     caption_text: Optional[str] = ""
 
 class CutRequest(BaseModel):
     video_path: str
+    video_title: Optional[str] = "Viral Clip"
     clips: Optional[List[ClipMeta]] = []
     aspect_ratio: str = "9:16"
     caption_style: str = "hormozi"
@@ -124,7 +130,7 @@ class YoutubeRequest(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Backend Stable with Virality Scoring"}
+    return {"status": "ok", "message": "Backend Ready"}
 
 @app.post("/upload")
 async def upload_video(file: UploadFile = File(...)):
@@ -133,7 +139,7 @@ async def upload_video(file: UploadFile = File(...)):
     with open(dest_path, "wb") as buffer:
         while chunk := await file.read(1024 * 1024 * 4):
             buffer.write(chunk)
-    return {"status": "success", "path": dest_path}
+    return {"status": "success", "path": dest_path, "title": file.filename.rsplit('.', 1)[0]}
 
 @app.post("/download-yt")
 def download_youtube_video(payload: YoutubeRequest):
@@ -157,6 +163,8 @@ def download_youtube_video(payload: YoutubeRequest):
             if not video_filename.endswith('.mp4'):
                 video_filename = os.path.splitext(video_filename)[0] + '.mp4'
 
+        video_title = info.get('title', 'Viral Video')
+
         clips = []
         vtt_files = glob.glob(os.path.join(UPLOAD_DIR, f"yt_{unique_id}*.vtt"))
         if vtt_files:
@@ -173,10 +181,11 @@ def download_youtube_video(payload: YoutubeRequest):
                     if txt and (not current_text or txt != current_text[-1]):
                         current_text.append(txt)
                     if (e - c_start) >= 30:
+                        t, _, _ = make_metadata(video_title, len(clips))
                         clips.append({
                             "timestamp_start": str(round(c_start, 2)),
                             "timestamp_end": str(round(e, 2)),
-                            "title": random.choice(VIRAL_HOOKS),
+                            "title": t,
                             "caption_text": " ".join(current_text)
                         })
                         current_text = []
@@ -187,11 +196,11 @@ def download_youtube_video(payload: YoutubeRequest):
 
         if not clips:
             clips = [
-                {"timestamp_start": "10", "timestamp_end": "40", "title": VIRAL_HOOKS[0], "caption_text": "WATCH THIS INCREDIBLE MOMENT RIGHT HERE"},
-                {"timestamp_start": "45", "timestamp_end": "75", "title": VIRAL_HOOKS[1], "caption_text": "THE MOST IMPORTANT PART OF THE VIDEO"}
+                {"timestamp_start": "10", "timestamp_end": "40", "title": f"The Best Part of {video_title[:20]}", "caption_text": "WATCH THIS INCREDIBLE MOMENT RIGHT HERE"},
+                {"timestamp_start": "45", "timestamp_end": "75", "title": "You Must See This Part!", "caption_text": "THE MOST IMPORTANT PART OF THE VIDEO"}
             ]
 
-        return {"status": "success", "path": video_filename, "title": info.get('title', 'Video'), "clips": clips}
+        return {"status": "success", "path": video_filename, "title": video_title, "clips": clips}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -202,7 +211,7 @@ def cut_video_clips(payload: CutRequest):
 
     clips = payload.clips
     if not clips:
-        clips = [ClipMeta(timestamp_start="10", timestamp_end="40", title=VIRAL_HOOKS[0], caption_text="VIRAL MOMENT")]
+        clips = [ClipMeta(timestamp_start="10", timestamp_end="40", title="Viral Highlight", caption_text="VIRAL MOMENT")]
 
     results = []
     ratio_filters = {
@@ -211,8 +220,6 @@ def cut_video_clips(payload: CutRequest):
         "16:9": "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080"
     }
     base_vf = ratio_filters.get(payload.aspect_ratio, ratio_filters["9:16"])
-
-    scores = [98, 94, 91, 88]
 
     for i, clip in enumerate(clips):
         start_sec = parse_time(clip.timestamp_start)
@@ -246,12 +253,15 @@ def cut_video_clips(payload: CutRequest):
         try:
             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
             file_size = round(os.path.getsize(output_filepath) / (1024 * 1024), 2)
+            
+            final_title, tags, score = make_metadata(payload.video_title, i)
+            
             results.append({
                 "url": f"/outputs/{output_filename}",
                 "filename": output_filename,
-                "title": clip.title if clip.title and clip.title != "Clip" else random.choice(VIRAL_HOOKS),
-                "score": scores[i % len(scores)],
-                "hashtags": random.choice(TRENDING_TAGS),
+                "title": final_title,
+                "score": score,
+                "hashtags": tags,
                 "size_mb": file_size,
                 "error": False
             })
